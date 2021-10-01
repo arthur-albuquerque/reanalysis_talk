@@ -1,0 +1,1249 @@
+---
+title: "DOJO: Re-análise Bayesiana de Ensaios Clínicos Randomizados"
+author: "Arthur M. Albuquerque e Breno Marques"
+date: "09/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Instalar/carregar pacotes
+
+```{r}
+# Vamos usar o pacote pacman para instalar/carregar todos os outros pacotes
+
+# Este código vai baixar o pacman caso não esteja instalado
+if (!require("pacman")) install.packages("pacman")
+
+# Vamo usar a função p_load do pacote pacman para instalar e carregar os pacotes
+# ou seja, ele funciona como "install.packages()" e "library()" simultaneamente
+
+pacman::p_load(
+  devtools,
+  tidyverse, # data wrangling + ggplot
+  metafor, # calcular os tamanhos de efeito com escalc()
+  flextable, # tabelas
+  ggdist # plot # juntar plots
+)
+
+# Instalar um pacote de paleta de cores que não está no CRAN
+if (!require("feathers")) devtools::install_github(repo = "shandiya/feathers",
+                                                   ref = "main")
+library(feathers)
+
+```
+
+```{r}
+# Padronizar o tema de todos os gráficos
+
+theme_set(
+  theme(
+  plot.title.position = 'plot',
+  axis.ticks.x = element_blank(),
+  axis.ticks.y = element_blank(),
+  axis.text.x = element_text(size = 12),
+  axis.text.y = element_text(size = 12),
+  axis.title.x = element_text(size = 16),
+  panel.background = element_blank(),
+  panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+  plot.margin = margin(20, 20, 20, 20)
+  )
+)
+```
+
+
+Como vamos re-analisar ensaios clínicos randomizados (ECR) que avaliaram desfechos
+binários, apenas precisamos do número de eventos e pacientes em cada braço de
+tratamento. 
+
+Vamos re-analisar dois ECRs:
+
+* ANDROMEDA-SHOCK, que avaliou mortalidade em pacientes com choque séptico
+  * "Objective  To determine if a peripheral perfusion–targeted resuscitation
+      during early septic shock in adults is more effective than a lactate
+      level–targeted resuscitation for reducing mortality."
+      
+* EOLIA, que avaliou mortalidade em pacientes com SARA
+  * Pacientes em ECMO vs. tratamento controle
+
+
+Vamos criar uma tabela com essas informações:
+
+```{r}
+
+d = 
+  dplyr::tribble(
+  # a primeira linha refere aos nomes das colunas
+  ~estudo, ~desfecho, ~eventos_controle, ~total_controle, ~eventos_tto, ~total_tto,
+  
+  "ANDROMEDA-SHOCK", "mortalidade em 28 dias", 92, 212, 74, 212,
+  "EOLIA", "mortalidade em 60 dias", 57, 125, 44, 124
+  
+)
+
+# Referencias
+# ANDROMEDA-SHOCK: https://jamanetwork.com/journals/jama/fullarticle/2724361
+# EOLIA: https://www.nejm.org/doi/10.1056/NEJMoa1800385
+
+```
+
+Vamos ver como ficou a tabela:
+
+```{r}
+d %>% 
+  flextable() %>% 
+  autofit()
+```
+
+Agora, vamos calcular os tamanhos de efeito (log-odds ratio)
+
+```{r}
+d_TE = 
+  escalc(
+    measure = "OR", # Log-odds ratio
+    
+    # Tratamento
+    ai = eventos_tto,
+    n1i = total_tto,
+
+    # Controle
+    ci = eventos_controle,
+    n2i = total_controle,
+    
+    data = d
+  ) %>% 
+  as_tibble()
+```
+
+Quais são os tamanhos de efeito?
+
+```{r}
+d_TE %>% 
+  select(estudo, yi, vi) %>% 
+  flextable() %>% 
+  autofit()
+```
+
+Como a média e a variância estão na escala log, vamos tentar facilitar
+a interpretação transformando para escala linear e calculando o intervalo de
+confiança de 95%. 
+
+Para isso, iremos usar as seguinte fórmulas:
+
+$$
+\operatorname{Erro padrao} = \sqrt{Variância} = EP\\
+log(\operatorname{Limite Superior do 95 CI}) = log(OR) + 1.96EP \\
+log(\operatorname{Limite Inferior do 95 CI}) = log(OR) - 1.96EP \\
+
+$$
+
+Valores arredondados *na escala linear*:
+
+```{r}
+d_TE %>%
+  
+  # Primeiro, vamos calcular os limites do intervalo de confiança
+  # Depois, vamos transformar para a escalar linear, exponenciando
+  
+  # yi = média / vi = variância em log
+  
+  # vamos criar novas colunas com o mutate
+  mutate(limite_superior = yi + 1.96*sqrt(vi), 
+         limite_inferior = yi - 1.96*sqrt(vi),
+         # Exponenciar
+         yiOR = exp(yi),
+         lsOR = exp(limite_superior),
+         liOR = exp(limite_inferior)) %>% 
+  
+  # Selecionar colunas relevantes
+  
+  select(estudo, yiOR, liOR, lsOR) %>% 
+  
+  # Arredondar em 2 dígitos decimais
+  
+  # Aqui vou usar a função mutate para modificar as colunas já existentes
+  # Para arrendondar, vou usar a função round()
+  # Como quero aplicar a mesma função para as colunas yiOR, liOR, lsOR,
+  # vou usar o mutate() em conjunto com o across()
+  # "across(yiOR:lsOR" significa para aplicar a função da coluna yiOR até 
+  # a coluna lsOR, ou seja, colunas yiOR, liOR, lsOR
+  # Devemos colocar a função round() dentro do across() em conjunto
+  # com um ~ "~round()"
+  # Por fim, colocamos um "." dentro do round() para informar que queremos
+  # aplicar essa função para os elementos dentro da tabela
+
+  mutate(across(yiOR:lsOR, ~round(.,2))) %>% 
+  
+  # Aqui vou usar a função summarise, que cria novas colunas e elimina as "antigas"
+  summarise(
+    Estudo = estudo, # manter essa coluna
+    
+    # Aqui uso a função str_c(), que permite combinar texto com valores da tabela
+    # para criar uma expressão
+    "95% CI" = str_c(yiOR, " [", liOR, ", ", lsOR, "]")
+  ) %>% 
+    flextable() %>% 
+    autofit()
+```
+
+Visualização:
+
+```{r}
+d_TE %>%
+  # Mesmos cálculos
+  mutate(limite_superior = yi + 1.96*sqrt(vi), 
+         limite_inferior = yi - 1.96*sqrt(vi),
+         yiOR = exp(yi),
+         lsOR = exp(limite_superior),
+         liOR = exp(limite_inferior),
+         # Inverter a ordem dos estudos para o gráfico
+         estudo = fct_rev(estudo)) %>% 
+  
+  # Definir os argumentos para o ggplot
+  ggplot(aes(x = yiOR, xmin = liOR, xmax = lsOR, y = estudo)) +
+  
+  # Plotar os intervalos
+  ggdist::geom_pointinterval() +
+  # Linha vertical pontilhada em OR = 1
+  geom_vline(xintercept = 1, linetype = 2) +
+  # Definir a escala do eixo X
+  scale_x_continuous(breaks = seq(0.3, 1.3, 0.1),
+                     limits = c(0.3, 1.3)) +
+  # Legendas (o \n faz pular uma linha)
+  labs(x = "\nOdds Ratio", y = NULL,
+       title = "Médias e intervalos de confiança 95% na escala linear\n")
+```
+
+
+# ANDROMEDA-SHOCK
+
+## Priors
+
+Relembrando que os priors estão na escala log e são normalmente distribuídos.
+
+Como orientado por Zampieri et al. (doi: 10.1164/rccm.202006-2381CP), nossos
+priors possuem dois componentes:
+
+1. "Prior Belief"
+2. "Belief Strength"
+
+O "Prior Belief" diz respeito a crença e aqui vamos usar pelo menos três:
+
+1. Optimistic
+2. Pessimistic
+3. Skeptical
+
+Assim, nós definimos a *média* da distribuição dos nossos priors baseada nos 
+"Prior Beliefs".
+
+Por outro lado, "Belief Strength" diz respeito a força da nossa crença. Nesse
+caso, nós definimos a variância dos nossos priors baseada nos "Beliefs Strength".
+
+Agora, vamos explicar como definimos a média e variância de cada prior:
+
+*Optimistic*
+
+$$
+
+log[OR] \sim \operatorname{Normal}(-0.65, 0.626^2)
+
+$$
+
+No ECR ANDROMEDA-SHOCK, o cálculo de poder foi feito esperando um tamanho de
+efeito correspondente a OR de *0.52*. Assim, vamos usar esse valor como a média
+do nosso prior otimista. Como os priors estão na escala log, a média será
+$log[0.52] = -0.65$
+
+Para definir a variância, decidimos que há evidência compatível com uma força
+moderada. Como Zampieri et al. definiram (Table 1):
+
+"“I believe the intervention is good, but I acknowledge there is a
+nonnegligible chance it may be harmful.”
+
+Assim, usamos uma variância que permita 15% de probabilidade de OR > 1
+(malefício).
+Como estamos usando a escala log, isso siginifca 15% de probabilidade de 
+log[OR] > 0.
+
+A variância que permite isso é $0.626^2$, como visualizado abaixo:
+
+```{r}
+prob = 
+  100 - 100*round(
+  # Esta função nos permite calcular a probabilidade > 0 dado média e desvio padrão
+  pnorm(0, mean = -0.65, sd = 0.626),
+  3)  
+
+ggplot(data = data.frame(x = c(-3, 3)), aes(x)) + #Empty plot
+  
+  # Área
+  geom_area(stat = "function", fun = dnorm,
+            args = list(mean = -0.65, sd = 0.626), # Média e desvio padrão
+             xlim = c(0, 3), # Range da área
+            fill = "firebrick", alpha=0.9) +
+  # Curve
+  stat_function(fun = dnorm, n = 1000,
+              args = list(mean = -0.65, sd = 0.626), # Média e desvio padrão
+              linetype=1, size = 1.2) +
+  # Text
+  annotate("text", x = 0.7, y = 0.2, label = paste0(prob, "%"),
+           colour = "black",  size = 7, fontface = "bold") +
+  
+  # Dashed line
+  geom_vline(xintercept = 0, linetype = 2) +
+  
+  scale_y_continuous(breaks = NULL,
+                     limits = c(0, 1.7),
+                     expand = c(0, 0)) + # remove gap between X and Y axis
+  scale_x_continuous(breaks = c(-0.65, 0.65, seq(from = -2, to = 2, by = 2)),
+                     labels = function(x) round(as.numeric(x), 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(x = c(-3, 3)) +
+  labs(x = NULL,
+       y = "Densidade\n")
+```
+
+
+*Pessimistic*
+
+$$
+
+log[OR] \sim \operatorname{Normal}(0.65, 0.626^2)
+
+$$
+
+Neste caso, apenas invertemos o sinal da média.
+
+```{r}
+prob = 
+  100*round(
+  # Esta função nos permite calcular a probabilidade > 0 dado média e desvio padrão
+  pnorm(0, mean = 0.65, sd = 0.626),
+  3)  
+
+ggplot(data = data.frame(x = c(-3, 3)), aes(x)) + #Empty plot
+  
+  # Área
+  geom_area(stat = "function", fun = dnorm,
+            args = list(mean = 0.65, sd = 0.626), # Média e desvio padrão
+             xlim = c(-3, 0), # Range da área
+            fill = "forestgreen", alpha=0.9) +
+  # Curve
+  stat_function(fun = dnorm, n = 1000,
+              args = list(mean = 0.65, sd = 0.626), # Média e desvio padrão
+              linetype=1, size = 1.2) +
+  # Text
+  annotate("text", x = -0.7, y = 0.2, label = paste0(prob, "%"),
+           colour = "black",  size = 7, fontface = "bold") +
+  
+  # Dashed line
+  geom_vline(xintercept = 0, linetype = 2) +
+  
+  scale_y_continuous(breaks = NULL,
+                     limits = c(0, 1.7),
+                     expand = c(0, 0)) + # remove gap between X and Y axis
+  scale_x_continuous(breaks = c(-0.65, 0.65, seq(from = -2, to = 2, by = 2)),
+                     labels = function(x) round(as.numeric(x), 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(x = c(-3, 3)) +
+  labs(x = NULL,
+       y = "Densidade\n")
+```
+
+
+*Skeptical*
+
+$$
+
+log[OR] \sim \operatorname{Normal}(0, 0.355^2)
+
+$$
+
+Neste caso, centramos a média em nenhum efeito (OR = 1, log[OR] = 0). Sobre
+a força da nossa crença, decidimos seguir uma opinião "moderada", citando
+a definição de Zampieri et. al:
+
+"I have no reason to believe the intervention is good or bad,
+but I am mostly sure I can rule out large effect sizes.”
+
+Assim, há 95% de probabilidade que o efeito esteja entre 0.5 e 2 OR, como
+visualizado abaixo. A variância que permite isso é $0.355^2$
+
+```{r}
+prob1 = 
+  100*round(
+  # Esta função nos permite calcular a probabilidade > 0 dado média e desvio padrão
+  pnorm(log(0.5), mean = 0, sd = 0.355),
+  3)  
+
+prob2 = 
+  100 - 100*round(
+  # Esta função nos permite calcular a probabilidade > 0 dado média e desvio padrão
+  pnorm(log(2), mean = 0, sd = 0.355),
+  3)
+
+ggplot(data = data.frame(x = c(-3, 3)), aes(x)) + #Empty plot
+  
+  # Área < log(0.5)
+  geom_area(stat = "function", fun = dnorm,
+            args = list(mean = 0, sd = 0.355), # Média e desvio padrão
+             xlim = c(-3, log(0.5)), # Range da área
+            fill = "gray60", alpha=0.9) +
+  # Área > log(2.0)
+  geom_area(stat = "function", fun = dnorm,
+            args = list(mean = 0, sd = 0.355), # Média e desvio padrão
+             xlim = c(log(2), 3), # Range da área
+            fill = "gray60", alpha=0.9) +
+  # Curve
+  stat_function(fun = dnorm, n = 1000,
+              args = list(mean = 0, sd = 0.355), # Média e desvio padrão
+              linetype=1, size = 1.2) +
+  
+  # Texto prob < log(0.5)
+  annotate("text", x = -1.1, y = 0.2, label = paste0(prob1, "%"),
+           colour = "black",  size = 7, fontface = "bold") +
+  # Texto prob > log(2.0)
+  annotate("text", x = 1.1, y = 0.2, label = paste0(prob1, "%"),
+           colour = "black",  size = 7, fontface = "bold") +
+  
+  # Dashed line
+  geom_vline(xintercept = 0, linetype = 2) +
+  
+  scale_y_continuous(breaks = NULL,
+                     limits = c(0, 1.7),
+                     expand = c(0, 0)) + # remove gap between X and Y axis
+  scale_x_continuous(breaks = c(log(0.5), log(2), seq(from = -2, to = 2, by = 2)),
+                     labels = function(x) round(as.numeric(x), 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(x = c(-3, 3)) +
+  labs(x = NULL,
+       y = "Densidade\n")
+```
+
+*Vague*
+
+$$
+
+log[OR] \sim \operatorname{Normal}(0, 10^2)
+
+$$
+
+Adicionamos este prior vago para não promover nenhuma influência nos resultados
+finais (posterior distribution). Assim, sua variância é igual a $10^2$.
+
+
+```{r}
+
+ggplot(data = data.frame(x = c(-3, 3)), aes(x)) + #Empty plot
+  # Curve
+  stat_function(fun = dnorm, n = 1000,
+              args = list(mean = 0, sd = 10), # Média e desvio padrão
+              linetype=1, size = 1.2) +
+  
+  # Dashed line
+  geom_vline(xintercept = 0, linetype = 2) +
+  
+  scale_y_continuous(breaks = NULL,
+                     limits = c(0, 1.7),
+                     expand = c(0, 0)) + # remove gap between X and Y axis
+  scale_x_continuous(breaks = seq(from = -2, to = 2, by = 2),
+                     labels = function(x) round(as.numeric(x), 2),
+                     expand = c(0, 0)) +
+  coord_cartesian(x = c(-3, 3)) +
+  labs(x = NULL,
+       y = "Densidade\n")
+```
+
+Como esperado, é uma linha aproximadamente uniforme.
+
+## Análises
+
+Vamos agora colocar todas as médias e desvios (erros) padrões em uma tabela:
+
+```{r}
+priors_andromeda = 
+  tribble(
+  ~belief, ~prior.mean, ~prior.se,
+  "optimistic", -0.65, 0.626,
+  "pessimistic", 0.65, 0.626,
+  "skeptical", 0, 0.355,
+  "vague", 0, 10
+) %>% 
+  # Variância
+  mutate(prior.var = prior.se^2)
+
+priors_andromeda %>% 
+  flextable() %>% 
+  autofit()
+
+```
+
+Em seguida, vamos juntar a tabela acima com os dados originais do
+ANDROMEDA-SHOCK. Obviamente, a média e variância do ECR será a mesma para todos
+os "beliefs", pois o que muda em cada linha é a informação referente ao prior.
+
+```{r}
+andromeda_mean =
+  d_TE %>%
+  filter(estudo == "ANDROMEDA-SHOCK") %>% 
+  pull(yi)
+
+andromeda_var =
+  d_TE %>%
+  filter(estudo == "ANDROMEDA-SHOCK") %>% 
+  pull(vi)
+
+prior_data_andromeda = 
+  priors_andromeda %>% 
+  # Remover coluna
+  select(-prior.se) %>% 
+  mutate(data.mean = andromeda_mean,
+         data.var = andromeda_var)
+
+prior_data_andromeda %>% 
+  flextable() %>% 
+  autofit()
+```
+
+Hoje, iremos usar uma forma analítica de calcular a distribuição posterior.
+
+Assumimos que o prior segue uma distribuição normal:
+
+$$log[OR]_{Prior} \sim \operatorname{Normal}(\theta,\sigma^2)$$
+
+onde $\theta$ representa a média e $\sigma^2$ a variância.
+
+Da mesma forma, assumimos o mesmo para os dados, no caso, referente ao
+ANDROMEDA-SHOCK:
+
+$$log[OR]_{Data} \sim \operatorname{Normal}(\hat{\theta},\hat{\sigma}^2)$$
+
+Note que agora os paramêtros são $\hat{\theta}$ e $\hat{\sigma}^2$, diferente de
+$\theta$ e $\sigma^2$ do prior.
+
+Com isso, podemos calcular a média da distribuição posterior com a seguinte
+fórmula:
+
+$$\frac{\frac{\theta}{\sigma^2} + \frac{\hat\theta}{\hat\sigma^2}}{\frac{1}{\sigma^2}+\frac{1}{\hat\sigma^2}}$$
+
+e a variância:
+
+$$\frac{1}{\frac{1}{\sigma^2}+\frac{1}{\hat\sigma^2}}$$
+
+Para mais detalhes, recomendo o livro: 
+
+* Spiegelhalter DJ, Abrams KR, Myles JP. Bayesian Approaches to Clinical Trials
+and Health Care Evaluation. Wiley; 2004.
+
+No código abaixo, encontramos uma função correspondente às fórmulas citadas
+acima:
+
+```{r}
+####################################################################
+#  R function for Bayesian analysis of normal mean, variance known #
+#  Parameters included are:                                        #
+#                                                                  #
+#  Inputs:                                                         #
+#                                                                  #
+#   x = vector of data                                             #
+#   prior.mean = prior mean                                        #
+#   prior.var  = prior variance                                    #
+#   data.var   = assumed known variance of data                    #
+#                                                                  #
+#  Outputs:                                                        #
+#                                                                  #
+#   post.mean = posterior mean                                     #
+#   post.var  = posterior variance                                 #
+#                                                                  #
+#   Adapted from:                                                  #
+#           Brophy, J. M. (2020). Bayesian Interpretation of       #
+#           the EXCEL Trial and Other Randomized Clinical Trials   #
+#           of Left Main Coronary Artery Revascularization.        #
+#           JAMA Internal Medicine, 180(7), 986–992.               #
+#                                                                  #
+#           https://doi.org/10.1001/jamainternmed.2020.1647        #
+#                                                                  #
+####################################################################
+
+post.normal.mean <- function(prior.mean, prior.var, data.mean, data.var)
+{
+  post.mean.numerator <- prior.mean/prior.var + data.mean/data.var
+  post.mean.denominator <- 1/prior.var + 1/data.var
+  post.mean <-  post.mean.numerator/post.mean.denominator
+  post.var <- (1/(1/prior.var + 1/data.var))
+  newlist <- tibble(post.mean, post.var)
+  return(newlist)
+}
+```
+
+Vamos aplicar essa função na nossa tabela com todos os priors e dados e visualizar
+o resultado final:
+
+```{r}
+prior_data_posterior_andromeda = 
+  
+  prior_data_andromeda %>% 
+  
+  # Usar nest para poder aplicar a função embaixo
+  nest(data = c(prior.mean:data.var)) %>%
+  
+  mutate(posterior = 
+               # pmap() para aplicar uma função dentro da tabela
+               pmap(
+                 prior_data_andromeda %>% select(-belief), # Especificar coluna
+                    post.normal.mean) # Função que criamos acima
+             ) %>%
+  # Voltar "ao normal"
+  unnest(data:posterior)
+
+prior_data_posterior_andromeda %>% 
+  flextable() %>% 
+  autofit()
+```
+
+Temos duas novas colunas "post.mean" e "post.var", que correspondem,
+respectivamente, à média e variância das distribuições posteriores.
+
+## Resultados
+
+Vamos comparar o resultado original (frequentista) com o distribuição posterior
+usando um prior vago?
+
+```{r}
+## Data wrangle para facilitar o plot
+
+# Extrair média e 95% CI frequentista (a partir das colunas data.mean e data.var)
+frequentista = 
+  prior_data_posterior_andromeda %>% 
+  # Escolher qualquer belief, tendo em vista que os dados são os mesmos
+  # em qualquer um
+  filter(belief == "vague") %>% 
+  mutate(data_limite_superior = data.mean + 1.96*sqrt(data.var), 
+         data_limite_inferior = data.mean - 1.96*sqrt(data.var)) %>% 
+  summarise(OR = exp(data.mean),
+            lsOR = exp(data_limite_superior),
+            liOR = exp(data_limite_inferior)) %>% 
+  pivot_longer(everything(),
+               names_to = "label",
+               values_to = "valor") %>% 
+  mutate(versao = "Frequentista")
+
+# Extrair média e 95% CI bayesiano (a partir das colunas post.mean e post.var)
+# assumindo um prior vago
+bayesiano = 
+  prior_data_posterior_andromeda %>% 
+  filter(belief == "vague") %>% 
+  mutate(post_limite_superior = post.mean + 1.96*sqrt(post.var), 
+         post_limite_inferior = post.mean - 1.96*sqrt(post.var)) %>% 
+  summarise(OR = exp(post.mean),
+            lsOR = exp(post_limite_superior),
+            liOR = exp(post_limite_inferior)) %>% 
+  pivot_longer(everything(),
+               names_to = "label",
+               values_to = "valor") %>% 
+  mutate(versao = "Bayesiano\n(Vague prior)")
+
+# Juntar os dois
+
+bind_rows(frequentista, bayesiano) %>% 
+  pivot_wider(names_from = label,
+              values_from = valor) %>% 
+  
+  # Definir os argumentos para o ggplot
+  ggplot(aes(x = OR, xmin = liOR, xmax = lsOR, y = versao)) +
+  
+  # Plotar os intervalos
+  ggdist::geom_pointinterval() +
+  # Linha vertical pontilhada em OR = 1
+  geom_vline(xintercept = 1, linetype = 2) +
+  # Definir a escala do eixo X
+  scale_x_continuous(breaks = seq(0.4, 1.1, 0.1),
+                     limits = c(0.4, 1.1)) +
+  # Legendas (o \n faz pular uma linha)
+  labs(x = "\nOdds Ratio", y = NULL,
+       title = "Médias e intervalos de confiança 95% na escala linear\n")
+```
+
+Como esperado, os resultados são, aproximadamente, idênticos. Isso aconteceu
+porque estamos visualizando o resultado bayesiano cujo prior era vago. Logo,
+esse influenciou, praticamente, nada. Dessa forma, os dados originais do
+ANDROMEDA-SHOCK dominaram e prevaleceram =)
+
+Ok, os intervalos são iguais, mas será que a interpretação é a mesma?
+
+Como condicionamos nossa análise em uma probabilidade prévia (prior vago),
+geramos uma distribuição posterior. Dessa forma, podemos analisar a distribuição
+como um todo.
+
+Vamos agora visualizar a distribuição posterior que mostramos acima. No entanto,
+iremos, *literalmente*, visualizar a distribuição. 
+
+Como usamos uma análise  normal conjugada (prior + dados normais), podemos
+assumir que a distribuição posterior, também, é normal! 
+
+Dessa forma, iremos extrair 100000 amostras dessa distribuição posterior a partir
+da média e variância que mostramos anteriormente.
+
+```{r}
+set.seed(123) # set seed for reproducibility (rnorm())
+n = 10e4 # número de samples
+  
+
+vague_samples = 
+  prior_data_posterior_andromeda %>%
+  filter(belief == "vague") %>%
+  # Função rnorm para samplear de uma distribuição normal
+  summarise(samples = rnorm(n,
+                            mean = post.mean,
+                            sd = sqrt(post.var)))
+
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples)
+    )) +
+  ggdist::stat_halfeye(.width = 0.95,
+                       point_interval = mean_qi, # Median e intervalo de quartil
+                       fill = "skyblue") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior distribution using a vague prior (quantile interval)\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+Então, estamos visualizando a distribuição posterior em azul e, embaixo, 
+a média e o intervalo de credibilidade de 95% baseado em quantil.
+
+Porém, há diversas formas de calcular esse intervalo. Uma ótima alternativa
+é o "highest density interval", definido como: 
+
+**"the narrowest interval containing 95% of the probability density function"**
+
+por Richard McElreath em seu livro Statistical Rethinking 2a edição.
+
+Vamos visualizar esse intervalo na mesma distribuição:
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples)
+    )) +
+  ggdist::stat_halfeye(.width = 0.95,
+                       point_interval = median_hdi, # Mediana e HDI
+                       fill = "skyblue") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior distribution using a vague prior (95% highest density interval)\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+Perceba que o limite superior é mais próximo do 1.0
+
+**Mas, por que precisamos usar o intervalo de 95%? Por que não 97%? Ou 63%?**
+
+Seguindo o McElreath, a partir de agora iremos representar apenas o 
+intervalo de credibilidade de 89%. Por que 89%? Segundo o McElreath em seu livro:
+
+* '89 is a prime number, so if someone asks you to justify it, you can
+stare at them meaningfully and incant, “Because it is prime.” That’s no worse
+justification than the conventional justification for 95%.'
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples)
+    )) +
+  ggdist::stat_halfeye(.width = 0.89,
+                       point_interval = median_hdi, # Mediana e HDI
+                       fill = "skyblue") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior distribution using a vague prior (89% highest density interval)\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+E se... eu não quiser um intervalo? Nós agora temos uma distribuição inteira!!
+Claro, um intervalo ajuda na interpretação, mas nada nos obriga a ter que mostrar
+o intervalo.
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples)
+    )) +
+ stat_slab(show.legend = FALSE,
+           fill = "skyblue") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior distribution using a vague prior\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+Pronto, apenas uma simples e bela distribuição posterior.
+
+Como temos uma distribuição, podemos calcular a área sob a curva (AUC) de 
+qualquer intervalo. Já já explico a utilidade disso.
+
+Vamos visualizar algumas AUC:
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples),
+    fill_ramp = stat(x < 1)
+    )) +
+ stat_slab(show.legend = FALSE,
+           fill = "#EECE9C") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "AUC < 1.0\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples),
+    fill_ramp = stat(x < 0.8)
+    )) +
+  stat_slab(show.legend = FALSE,
+           fill = "#BE6376") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "AUC < 0.8\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+```{r}
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples),
+    fill_ramp = stat(x < 0.6)
+    )) +
+ stat_slab(show.legend = FALSE,
+           fill = "#605A91") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "AUC < 0.6\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+```{r}
+
+vague_samples %>% 
+  
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples),
+    fill_ramp = stat(x > 1.0)
+    )) +
+ stat_slab(show.legend = FALSE,
+           fill = "firebrick") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "AUC > 1.0\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.3, 1.2)) +
+  theme(axis.text.y = element_blank())
+```
+
+Tá, mas pra que calcular o AUC? 
+
+Perceberam que até agora não mencionamos o infame valor P? Bem, agora temos algo
+muito mais interessante (na nossa opinião): 
+
+**A(s) probabilidade(s) posterior(es)**
+
+O que é isso? É a AUC. Sim, isso mesmo. Mas, como vocês puderam ver acima, 
+existem infinitas AUC, pois existem infinitos cortes e direções (nós só 
+mostramos 4 combinações).
+
+Para explicar melhor a utilidade, vamos calcular os AUC mostrados acima:
+
+```{r}
+# Perceba que usamos o mean() para calcular os AUC (isso é muuuuuito útil!!!)
+vague_samples %>% 
+  summarise("AUC(< 1.0)" = mean(exp(samples) < 1),
+            "AUC(< 0.8)" = mean(exp(samples) < 0.8),
+            "AUC(< 0.6)" = mean(exp(samples) < 0.6),
+            "AUC(> 1.0)" = mean(exp(samples) > 1.0)) %>% 
+  mutate(across(1:4, ~round(.,2))) %>% 
+  flextable() %>% 
+  autofit() %>% 
+  align(align = "center", part = "all")
+```
+
+Lembrando que o máximo é 1 (100%).
+
+Como interpretar o resultado de 0.96? Desta forma:
+
+* Levando em conta o prior e dados, há 96% de probabilidade do tratamento reduzir
+as chances de morte  no grupo tratamento vs. controle (qualquer benefício,
+isto é, OR < 1).
+
+Como interpretar o resultado de 0.22?
+
+* Levando em conta o prior e dados, há 22% de probabilidade do tratamento reduzir
+pelo menos 40% de chances de mortalidade  no grupo tratamento vs. controle
+(isto é, OR < 0.6).
+
+Como interpretar o resultado de 0.04?
+
+* Levando em conta o prior e dados, há 4% de probabilidade do tratamento aumentar
+a chances de mortalidade no grupo tratamento vs. controle (qualquer malefício,
+isto é, OR > 1.0).
+
+Resumindo, na análise bayesiana, temos a distribuição posterior do parâmetro 
+(no nosso caso, o tamanho de efeito). Com isso, podemos calcular a área sob
+a curva em qualquer corte e/ou direção (< ou >). 
+**Aqui, não temos o famoso problema frequentista de multiplicidade.** 
+Calcule quantos AUCs você quiser! Você não aumentará a taxa de erro do tipo 1.
+
+Isso nos dá a(s) probabilidade(s) posterior(es), que respondem uma pergunta
+simples e direta:
+
+* Qual é a probabilidade do efeito ser *maior/menor* que este *corte*, assumindo
+nosso prior e dados?
+
+Vamos agora visualizar o intervalo de credibilidade (CrI) de 89% juntos com os
+AUCs, isto é, probabilidade posteriores em uma tabela:
+
+```{r}
+cri89 =
+  vague_samples %>% 
+  # Calcular a mediana e 89%HDI
+  ggdist::median_hdi(exp(samples), # exp() para transformar para Odds Ratio
+                     .width = 0.89) %>% 
+  mutate(across(1:3, ~round(.,2))) %>% 
+  summarise(cri = str_c(`exp(samples)`, " [", .lower, ", ", .upper, "]")) %>% 
+  pull()
+  
+
+vague_samples %>% 
+  summarise("89% CrI" = cri89,
+            "Pr(< 1.0)" = mean(exp(samples) < 1),
+            "Pr(< 0.8)" = mean(exp(samples) < 0.8),
+            "Pr(< 0.6)" = mean(exp(samples) < 0.6),
+            "Pr(> 1.0)" = mean(exp(samples) > 1.0)) %>% 
+  mutate(across(2:5, ~round(.,2))) %>% 
+  flextable() %>% 
+  autofit() %>% 
+  align(align = "center", part = "all")
+```
+
+Perceba que eu apenas substitui o "AUC" por "Pr".
+
+Vamos agora extrair as samples de todas as distriuições para o resto das
+análises:
+
+```{r}
+set.seed(123)
+n = 10e4
+# Função para gerar samples do Prior, Data e Posterior
+
+triplot_samples_fun = function(belief_prior){
+  
+  prior_data_posterior_andromeda %>%
+  filter(belief == belief_prior) %>%
+  summarise("Prior" = rnorm(n,
+                            mean = prior.mean,
+                            sd = sqrt(prior.var)),
+            "Data" = rnorm(n,
+                           mean = data.mean,
+                           sd = sqrt(data.var)),
+            "Posterior" = rnorm(n,
+                                mean = post.mean,
+                                sd = sqrt(post.var))) %>% 
+  # Formato longo para facilitar no ggplot
+  pivot_longer(everything(),
+               names_to = "label",
+               values_to = "samples") %>% 
+  # Criar coluna identificando o belief
+  mutate(belief = belief_prior)
+}
+
+# Gerar um objeto para cada belief 
+triplot_samples_vague = triplot_samples_fun("vague")
+triplot_samples_skeptical = triplot_samples_fun("skeptical")
+triplot_samples_pessimistic = triplot_samples_fun("pessimistic")
+triplot_samples_optimistic = triplot_samples_fun("optimistic")
+
+# Juntar todos (a tabela vai ficar com 1.2M de linhas!)
+
+triple_samples_todos =
+  bind_rows(
+    triplot_samples_vague,
+    triplot_samples_skeptical,
+    triplot_samples_pessimistic,
+    triplot_samples_optimistic
+  ) %>% 
+  # Mudar ordem para o ggplot
+  mutate(belief = fct_rev(belief), # apenas inverter
+        label = factor(label, levels = c("Posterior", "Data", "Prior"))
+        )
+
+```
+
+Vamos visualizar agora todos os nossos priors e posteriors correspondentes na 
+escala log:
+
+```{r fig.width=8}
+triple_samples_todos %>% 
+  ggplot(aes(x = samples, # Log Odds Ratio
+             y = label,
+             fill = label)) +
+  stat_halfeye(.width = 0.95,
+               point_interval = median_qi) +
+  scale_fill_manual(values = c("#9B5446",    # Posterior
+                               "#9FA464",    # Data
+                               "#E0C6B6")) + # Prior
+  geom_vline(xintercept = 0, linetype = 2) +
+  labs(x = "\nLog Odds Ratio",
+         y = NULL) +
+  scale_x_continuous(breaks = seq(from = -1.5, to = 1.5, by = 0.5)) +
+  coord_cartesian(x = c(-1.5, 1.5)) +
+  facet_wrap(~belief) + # super importante para separar os beliefs
+  theme(
+    legend.position = 'none',
+    strip.text.x = element_text(size = 16),
+    panel.spacing = unit(2, "lines"))
+  
+```
+
+Na escala linear:
+
+```{r fig.width=8}
+triple_samples_todos %>% 
+  ggplot(aes(x = exp(samples), # Odds Ratio
+             y = label,
+             fill = label)) +
+  stat_halfeye(.width = 0.95,
+               point_interval = median_qi) +
+  scale_fill_manual(values = c("#9B5446",    # Posterior
+                               "#9FA464",    # Data
+                               "#E0C6B6")) + # Prior
+  geom_vline(xintercept = 1, linetype = 2) +
+  labs(x = "\nOdds Ratio",
+         y = NULL) +
+  scale_x_continuous(breaks = seq(from = 0, to = 4.5, by = 1)) +
+  coord_cartesian(x = c(0, 4.5)) +
+  facet_wrap(~belief) + # super importante para separar os beliefs
+  theme(
+    legend.position = 'none',
+    strip.text.x = element_text(size = 16))
+  
+```
+
+Vamos agora filtrar a tabela apenas para os samples das distribuições posteriores,
+pois iremos focar apenas nessas.
+
+```{r}
+  
+posterior_samples_andromeda = 
+  triple_samples_todos %>% 
+  filter(label == "Posterior") %>% 
+  # Inverter a ordem para os plots
+  mutate(belief = fct_rev(belief))
+
+```
+
+Vamos visualizar as distribuições posteriores na escala linear:
+
+```{r}
+posterior_samples_andromeda %>% 
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples), 
+    y = belief,
+    fill = belief)
+    ) + 
+  ggdist::stat_halfeye(
+    # Mediana + Highest density interval
+    point_interval = median_hdi,
+    .width = 0.89
+    ) +
+  # Cores
+  scale_fill_manual(values = feathers::get_pal("rose_crowned_fruit_dove")) +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior Distributions (median + 89% HDI)\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.4, 1.2))  +
+  # Remover legenda
+  theme(legend.position = 'none')
+  
+```
+
+Ao invés de escolher alguns poucos cortes para calcular as probabilidades
+posteriores, podemos visualizar inúmeras em um único gráfico.
+
+Neste gráfico, deixamos o ggplot calcular as AUCs e interpretamos da seguinte forma:
+
+* Escolha um corte, por exemplo, Pr(<= 0.8)
+* Esse valor corresponde ao valor no eixo X
+* O valor do eixo Y correspondente é a probabilidade posterior <= 0.8
+
+Vale ressaltar que, neste único gráfico, não é possível calcular a probabilidade
+posterior em ambas direções (< ou >).
+
+```{r message=FALSE, warning=FALSE}
+posterior_samples_andromeda %>% 
+  
+  ggplot(aes(exp(samples), colour = belief)) +
+  geom_hline(yintercept = c(0.1, 0.3, 0.5, 0.7, 0.9), color = "gray80", size = 0.3) +  
+  geom_line(stat='ecdf', size = 1.2) +
+  scale_color_manual(' ',
+                    values = feathers::get_pal("rose_crowned_fruit_dove")
+                    ) +
+    labs(
+      x = "\nOdds Ratio",
+      y = expression("Probability OR" <= "X (%)"),
+      title = "Posterior Probabilities\n"
+      ) +
+  geom_vline(xintercept = 1, linetype = 2 , color = "gray30") +
+  geom_vline(xintercept = 0.8, linetype = 2, size = 0.6) +
+  scale_x_continuous(
+      breaks = seq(from = 0.4, to = 1, 0.1),
+      limits = c(0.4, 1.1)) +
+  scale_y_continuous(
+      breaks = seq(from = 0, to = 1, 0.2),
+      labels = c("0", "20", "40", "60", "80", "100"),
+      expand = c(0, .03)
+    ) +
+  theme(
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    legend.key = element_blank(),
+    legend.text = element_text(size=12)
+  )
+```
+
+Por fim, podemos também calcular a probabilidade posterior entre dois valores.
+Seguindo Zampieri et al., vamos avaliar a region of practical equivalence
+(ROPE). 
+
+```{r}
+posterior_samples_andromeda %>% 
+  # Plot!
+  ggplot(
+    aes(
+    # Lembram que estávamos tudo está na escala log? Use o exp() para escala linear
+    x = exp(samples), 
+    y = belief,
+    fill = belief)
+    ) + 
+  stat_slab() +
+  # Cores
+  scale_fill_manual(values = feathers::get_pal("rose_crowned_fruit_dove")) +
+  # Adicionar um retângulo
+  # https://r-graphics.org/recipe-annotate-rect
+  annotate("rect", xmin = 0.9, xmax = 1/0.9, ymin = -Inf, ymax = Inf,
+           alpha = .7, fill = "white") +
+  geom_vline(xintercept = 0.9, linetype = 2 , color = "gray30") +
+  geom_vline(xintercept = 1/0.9, linetype = 2 , color = "gray30") +
+  labs(x = "\n Odds Ratio",
+       y = NULL,
+       title = "Posterior Distributions + Region of Practical Equivalence (ROPE)\n") +
+  scale_x_continuous(breaks = seq(0.3, 1.2, 0.1)) +
+  # Prefiro usar o coord_cartesian() para definir os limites
+  coord_cartesian(x =  c(0.4, 1.2))  +
+  # Remover legenda
+  theme(legend.position = 'none')
+  
+```
+
+
+```{r message=FALSE}
+cri89 =
+  posterior_samples_andromeda %>% 
+  # Agrupar por belief para calcular o median_hdi separadamente
+  group_by(belief) %>% 
+  
+  # Calcular a mediana e 89%HDI
+  ggdist::median_hdi(exp(samples), # exp() para transformar para Odds Ratio
+                     .width = 0.89) %>% 
+  mutate(across(2:4, ~round(.,2))) %>% 
+  summarise(Belief = belief,
+            "89% CrI" = str_c(`exp(samples)`, " [", .lower, ", ", .upper, "]")) %>% 
+  mutate(Belief = fct_rev(Belief))
+  
+cri89 %>%
+  left_join(
+    posterior_samples_andromeda %>% 
+      group_by(belief) %>% 
+      summarise("Pr(ROPE)" = mean(exp(samples) > 0.9 & exp(samples) < 1/0.9),
+                "Pr(< 1.0)" = mean(exp(samples) < 1),
+                "Pr(< 0.8)" = mean(exp(samples) < 0.8),
+                "Pr(< 0.6)" = mean(exp(samples) < 0.6),
+                "Pr(> 1.0)" = mean(exp(samples) > 1.0),
+                "Pr(> 1.1)" = mean(exp(samples) > 1.1)) %>% 
+      mutate(across(2:7, ~round(.,2)),
+             Belief = fct_rev(belief)) %>% 
+      select(-belief)
+) %>% 
+  arrange(Belief) %>% 
+  flextable() %>% 
+  autofit() %>% 
+  align(align = "center", part = "all")
+```
+
+# EOLIA
+
+Agora, é com vocês! =)
+
+ps: existe uma reanálise do EOLIA já publicada no JAMA: 10.1001/jama.2018.14276
